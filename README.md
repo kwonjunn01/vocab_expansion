@@ -11,6 +11,40 @@ Liquid AI의 방식(블로그 "Tokenizer Expansion", 논문 *In-Place Tokenizer 
 3. **Stage 1, 임베딩만 학습**: 모델 본체를 얼리고 새 임베딩 행만 학습합니다.
 4. **Stage 2, 전체 CPT**: 대상 언어와 replay 데이터를 섞어 모델 전체를 학습합니다.
 
+## 아주 쉽게
+
+모델과 데이터만 있으면 됩니다.
+
+1. GPU 서버에 이 저장소를 받는다.
+2. `configs/example.yaml`을 복사해서 **모델 이름**과 **데이터 경로**만 바꾼다.
+3. `python pipeline.py --config <내 config>` 한 줄을 실행한다.
+4. 끝나면 `<output_dir>/stage2`에 새 모델이 생긴다.
+
+> 아직 실제 모델과 GPU로는 돌려보지 않았습니다(작은 모델로 CPU 테스트만 통과). 처음에는 반드시 작은 설정으로 스모크 테스트를 하세요.
+
+### AI 에이전트에게 맡길 때
+
+아래를 그대로 붙여넣고 `< >`만 바꾸세요.
+
+```
+https://github.com/kwonjunn01/vocab_expansion 를 clone해서 README를 읽고 실행해줘.
+
+- 베이스 모델: <모델 경로 또는 HF 이름>
+- 추가할 언어 데이터: <jsonl 경로 또는 HF 데이터셋>, 텍스트 필드 이름: <text>
+- 기존 언어(replay) 데이터: <경로>
+- GPU: <예: H100 x 8>
+
+순서:
+1. 토크나이저가 byte-level BPE인지 먼저 확인
+2. configs/example.yaml을 복사해서 위 정보로 수정
+3. 아주 작은 설정으로 스모크 테스트를 끝까지 돌리고 결과(verification.json, logit 변화, eval/results.json)를 보고해줘
+4. 문제 없으면 실제 규모로 실행
+Stage 1은 DDP, Stage 2는 FSDP로 돌려줘.
+```
+
+스모크 테스트 예시 설정: `num_new_tokens: 1000`, 소스별 `max_docs: 5000`, stage별 `args.max_steps: 20`, `train_tokens: 5_000_000`.
+확인할 것: `tokenizer/verification.json`에서 대상 언어 압축률이 1보다 큰지, init 로그의 "Max change of original logits"가 거의 0인지, `eval/results.json`의 bits/byte.
+
 ## 사용법
 
 ```bash
