@@ -1,8 +1,9 @@
 """Vocabulary expansion pipeline: one config, one command.
 
-    python pipeline.py --config configs/example.yaml                  # every stage
-    python pipeline.py --config configs/example.yaml --stages stage2  # one stage
-    python pipeline.py --config configs/example.yaml --from stage1    # resume
+    python pipeline.py --config configs/korean.yaml                   # every stage
+    python pipeline.py --config configs/korean.yaml --print-config    # show the full config
+    python pipeline.py --config configs/korean.yaml --stages stage2   # one stage
+    python pipeline.py --config configs/korean.yaml --from stage1     # resume
 
 Stages: tokenizer -> init -> data -> stage1 -> stage2 -> evaluate.
 A finished stage writes a _DONE marker and is skipped next time, unless --force is given.
@@ -21,6 +22,7 @@ import sys
 import torch
 import yaml
 
+from vocab_expansion.config import load_config, num_new_tokens
 from vocab_expansion.data import iter_texts, prepare_data
 from vocab_expansion.embedding_init import expand_embeddings, original_logits
 from vocab_expansion.evaluate import evaluate
@@ -48,7 +50,9 @@ def load_model(path, config, dtype="float32"):
 
 def corpus_texts(sources: list[dict]):
     for source in sources:
-        yield from iter_texts(source["dataset"], source.get("text_field", "text"), source.get("max_docs"))
+        yield from iter_texts(
+            source["dataset"], source.get("text_field", "text"), source.get("max_docs"), source.get("skip_docs", 0)
+        )
 
 
 def eval_texts(config) -> dict[str, list[str]]:
@@ -59,10 +63,13 @@ def eval_texts(config) -> dict[str, list[str]]:
 def run_tokenizer(config, out_dir):
     cfg = config["tokenizer"]
     old = load_tokenizer(config["base_model"], config)
+    old_size = max(old.get_vocab().values()) + 1
+    n_new = num_new_tokens(cfg, old_size)
+    logger.info("Vocabulary: %d -> %d tokens (%d new)", old_size, old_size + n_new, n_new)
     new, _ = expand_tokenizer(
         old,
         corpus_texts(cfg["corpus"]),
-        num_new_tokens=cfg["num_new_tokens"],
+        num_new_tokens=n_new,
         output_dir=out_dir,
         min_frequency=cfg.get("min_frequency", 2),
         max_token_length=cfg.get("max_token_length"),
@@ -142,11 +149,14 @@ def main(argv=None):
     parser.add_argument("--stages", nargs="+", choices=STAGES, help="stages to run (default: all)")
     parser.add_argument("--from", dest="start", choices=STAGES, help="run this stage and every later one")
     parser.add_argument("--force", action="store_true", help="rerun stages that are already done")
+    parser.add_argument("--print-config", action="store_true", help="print the full config and exit")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
-    with open(args.config) as f:
-        config = yaml.safe_load(f)
+    config = load_config(args.config)
+    if args.print_config:
+        print(yaml.safe_dump(config, sort_keys=False, allow_unicode=True))
+        return
     stages = args.stages or STAGES[STAGES.index(args.start) if args.start else 0 :]
 
     for stage in STAGES:

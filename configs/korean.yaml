@@ -1,0 +1,25 @@
+# Short form: the model, the target vocabulary size, the languages to add and where their data is.
+# Everything else (tokenizer corpus, data mixture, eval sets, training) is generated from it.
+# Run `python pipeline.py --config configs/korean.yaml --print-config` to see the full config,
+# and override any part of it by adding that section (see configs/example.yaml for the full form).
+
+base_model: LiquidAI/LFM3-1.7B
+output_dir: runs/lfm3-1.7b-ko
+launcher: accelerate launch      # or: python, torchrun --nproc_per_node 8
+
+target_vocab_size: 96000         # size of the final vocabulary (or num_new_tokens: 30000)
+
+languages:                       # languages to add
+  - name: ko
+    data: /data/ko/              # a file, a glob (/data/ko/*.jsonl), a directory, or a Hugging Face dataset
+    text_field: text             # .jsonl/.json/.parquet/.csv: the text column; .txt: one document per line
+
+replay:                          # original-language data, against forgetting
+  - name: en
+    data: HuggingFaceFW/fineweb-edu
+    subset: sample-10BT
+
+replay_ratio: 0.25               # share of replay tokens in training
+train_tokens: 2_000_000_000      # size of the training mixture, used once by stage 2; null: every document once
+# eval_docs: 200                 # first documents of each source, held out for evaluation
+# tokenizer_docs_per_language: 200000

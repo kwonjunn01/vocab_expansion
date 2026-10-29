@@ -10,14 +10,16 @@ Stage 1 trains few parameters and fits DDP; use FSDP or DeepSpeed for stage 2 if
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import logging
 import os
 
 import torch
-import yaml
 from datasets import load_from_disk
 from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
+
+from vocab_expansion.config import load_config
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +57,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO)
 
-    with open(args.config) as f:
-        config = yaml.safe_load(f)
+    config = load_config(args.config)
     out = config["output_dir"]
     stage = config[f"stage{args.stage}"]
     model_dir = os.path.join(out, STAGE_INPUTS[args.stage])
@@ -71,6 +72,9 @@ def main(argv=None):
     )
 
     training_args = dict(stage["args"])
+    if "warmup_ratio" in training_args and "warmup_ratio" not in inspect.signature(TrainingArguments).parameters:
+        # Transformers 5 dropped warmup_ratio: a float warmup_steps is a fraction of the total steps
+        training_args["warmup_steps"] = float(training_args.pop("warmup_ratio"))
     if args.stage == 1:
         new_rows_only = stage.get("train_new_rows_only", True)
         setup_stage1(model, meta, new_rows_only)

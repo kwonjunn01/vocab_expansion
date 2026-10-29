@@ -13,12 +13,46 @@ Liquid AI의 방식(블로그 "Tokenizer Expansion", 논문 *In-Place Tokenizer 
 
 ## 아주 쉽게
 
-모델과 데이터만 있으면 됩니다.
+**모델, 목표 vocab 크기, 추가할 언어와 데이터 위치**만 정하면 됩니다.
 
 1. GPU 서버에 이 저장소를 받는다.
-2. `configs/example.yaml`을 복사해서 **모델 이름**과 **데이터 경로**만 바꾼다.
+2. `configs/korean.yaml`을 복사해서 아래 항목만 바꾼다.
+   ```yaml
+   base_model: LiquidAI/LFM3-1.7B
+   output_dir: runs/my-run
+   target_vocab_size: 96000        # 최종 vocab 크기 (또는 num_new_tokens: 30000)
+   languages:                      # 추가할 언어 (여러 개 가능)
+     - name: ko
+       data: /data/ko/             # 파일, glob, 폴더, HF 데이터셋 이름
+   replay:                         # 기존 언어 데이터 (잊지 않게)
+     - name: en
+       data: HuggingFaceFW/fineweb-edu
+       subset: sample-10BT
+   ```
 3. `python pipeline.py --config <내 config>` 한 줄을 실행한다.
 4. 끝나면 `<output_dir>/stage2`에 새 모델이 생긴다.
+
+나머지(토크나이저 학습 코퍼스, 데이터 비율, 평가셋, 학습 설정)는 자동으로 채워집니다. 실제로 쓰일 전체 설정은 `--print-config`로 볼 수 있고, 바꾸고 싶은 부분만 config에 적으면 덮어씁니다. 예를 들어 `stage2: {args: {learning_rate: 1.0e-5}}`처럼요. 전체 형식은 `configs/example.yaml`을 보세요.
+
+**데이터 위치 형식**
+- `.jsonl`, `.json`, `.parquet`, `.csv`: 텍스트 컬럼은 `text_field`(기본 `text`)
+- `.txt`: 한 줄이 한 문서
+- 폴더: 안의 파일을 재귀적으로 읽음
+- 그 밖의 문자열: Hugging Face 데이터셋 이름. `subset`과 `split`을 같이 지정할 수 있음
+
+로컬 경로가 없으면 바로 에러가 납니다.
+
+**자동으로 정해지는 것**
+- 언어가 여러 개면 토크나이저 학습에 언어별로 같은 문서 수(`tokenizer_docs_per_language`, 기본 20만)를 써서, 큰 언어가 새 토큰을 독차지하지 않게 합니다. 학습 데이터 비율은 언어끼리 균등하고, 언어별 `weight`로 조절할 수 있습니다.
+- replay 비율은 `replay_ratio`(기본 0.25)입니다.
+- 소스마다 앞의 `eval_docs`(기본 200)개 문서는 학습에서 빼서 평가에 씁니다.
+
+**목표 크기 정하기**
+- `target_vocab_size`는 확장 후 vocab 전체 크기이고, `num_new_tokens`는 추가할 개수입니다. 둘 중 하나를 쓰면 됩니다.
+- 언어 하나당 대략 1만~3만 개를 추가하는 것이 흔합니다. LFM은 여러 언어를 위해 65K에서 128K로 늘렸습니다.
+- 클수록 압축률은 좋아지지만, 임베딩이 커지고 Stage 1에서 학습할 행이 늘어납니다.
+- 정하기 어렵다면 크기를 2~3개로 바꿔 `--stages tokenizer`만 돌려 보고 `verification.json`의 압축률(`compression_gain`)을 비교하세요. 이 단계는 GPU가 필요 없습니다.
+- byte-fallback 토크나이저에서는 새로 추가되는 글자 토큰도 이 개수에 포함됩니다.
 
 > 아직 실제 모델과 GPU로는 돌려보지 않았습니다(작은 모델로 CPU 테스트만 통과). 처음에는 반드시 작은 설정으로 스모크 테스트를 하세요.
 
@@ -30,28 +64,40 @@ Liquid AI의 방식(블로그 "Tokenizer Expansion", 논문 *In-Place Tokenizer 
 https://github.com/kwonjunn01/vocab_expansion 를 clone해서 README를 읽고 실행해줘.
 
 - 베이스 모델: <모델 경로 또는 HF 이름>
-- 추가할 언어 데이터: <jsonl 경로 또는 HF 데이터셋>, 텍스트 필드 이름: <text>
-- 기존 언어(replay) 데이터: <경로>
+- 목표 vocab 크기: <예: 96000>
+- 추가할 언어와 데이터 위치: <예: ko → /data/ko/, ja → /data/ja/*.jsonl>
+- 기존 언어(replay) 데이터: <경로 또는 HF 데이터셋>
 - GPU: <예: H100 x 8>
 
 순서:
 1. 토크나이저가 BPE(byte-level 또는 byte-fallback)인지 먼저 확인
-2. configs/example.yaml을 복사해서 위 정보로 수정
+2. configs/korean.yaml을 복사해서 위 정보로 수정하고, --print-config로 전체 설정을 확인
 3. 아주 작은 설정으로 스모크 테스트를 끝까지 돌리고 결과(verification.json, logit 변화, eval/results.json)를 보고해줘
 4. 문제 없으면 실제 규모로 실행
 Stage 1은 DDP, Stage 2는 FSDP로 돌려줘.
 ```
 
-스모크 테스트 예시 설정: `num_new_tokens: 1000`, 소스별 `max_docs: 5000`, stage별 `args.max_steps: 20`, `train_tokens: 5_000_000`.
-확인할 것: `tokenizer/verification.json`에서 대상 언어 압축률이 1보다 큰지, init 로그의 "Max change of original logits"가 거의 0인지, `eval/results.json`의 bits/byte.
+스모크 테스트 예시 설정은 다음과 같습니다.
+```yaml
+num_new_tokens: 1000
+tokenizer_docs_per_language: 5000
+train_tokens: 5_000_000
+stage1: {args: {max_steps: 20}}
+stage2: {args: {max_steps: 20}}
+```
+확인할 것은 세 가지입니다.
+- `tokenizer/verification.json`에서 대상 언어 압축률이 1보다 큰지
+- init 로그의 "Max change of original logits"가 거의 0인지
+- `eval/results.json`의 bits/byte
 
 ## 사용법
 
 ```bash
 pip install -r requirements.txt
-python pipeline.py --config configs/example.yaml                  # 전체
-python pipeline.py --config configs/example.yaml --stages tokenizer init   # 일부 단계만
-python pipeline.py --config configs/example.yaml --from stage2    # 이 단계부터 재개
+python pipeline.py --config configs/korean.yaml                   # 전체
+python pipeline.py --config configs/korean.yaml --print-config    # 실제로 쓰일 전체 설정 보기
+python pipeline.py --config configs/korean.yaml --stages tokenizer init   # 일부 단계만
+python pipeline.py --config configs/korean.yaml --from stage2     # 이 단계부터 재개
 ```
 
 단계: `tokenizer → init → data → stage1 → stage2 → evaluate`. 끝난 단계는 `_DONE` 표시를 남기고 다음 실행에서 건너뜁니다. 다시 돌리려면 `--force`를 붙이세요.
