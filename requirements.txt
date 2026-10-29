@@ -1,0 +1,7 @@
+torch>=2.4
+transformers>=4.56
+tokenizers>=0.21
+datasets>=3.0
+accelerate>=1.0
+pyyaml
+pytest

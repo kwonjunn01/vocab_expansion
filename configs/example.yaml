@@ -1,0 +1,103 @@
+# Vocabulary expansion of a dense model for Turkish, following the LFM recipe:
+# continue the BPE merges, initialise new embeddings as the mean of their sub-tokens,
+# train the new embedding rows only, then continue pre-training the full model.
+
+base_model: LiquidAI/LFM3-1.7B
+output_dir: runs/lfm3-1.7b-tr
+trust_remote_code: true
+# How training stages are launched: "python", "accelerate launch", "torchrun --nproc_per_node 8", ...
+launcher: accelerate launch
+
+tokenizer:
+  num_new_tokens: 16000        # final vocab is rounded up to a multiple of pad_to_multiple_of
+  min_frequency: 5             # stop early when no pair is this frequent
+  max_token_length: 32         # in byte-level characters (= bytes)
+  pad_to_multiple_of: 64
+  corpus:                      # text the new merges are learned from: target language only
+    - dataset: {path: wikimedia/wikipedia, name: 20231101.tr, split: train, streaming: true}
+      text_field: text
+      max_docs: 200000
+
+init:
+  dtype: float32
+  max_logit_change: 1.0e-2     # fail if the original logits move more than this
+
+data:
+  seq_len: 2048
+  train_tokens: 2_000_000_000  # null: use every row of every source once, ignoring weights
+  num_proc: 8
+  sources:
+    - name: tr_wiki
+      dataset: {path: wikimedia/wikipedia, name: 20231101.tr, split: train, streaming: true}
+      text_field: text
+      max_docs: 500000
+      eval_docs: 200           # held out from training, used as eval rows
+      weight: 0.4
+    - name: tr_web
+      dataset: {path: HuggingFaceFW/fineweb-2, name: tur_Latn, split: train, streaming: true}
+      text_field: text
+      max_docs: 2000000
+      eval_docs: 200
+      weight: 0.35
+    - name: en_replay          # original-language data, against forgetting
+      dataset: {path: HuggingFaceFW/fineweb-edu, name: sample-10BT, split: train, streaming: true}
+      text_field: text
+      max_docs: 1000000
+      eval_docs: 200
+      weight: 0.25
+
+stage1:                        # embeddings only
+  dtype: float32
+  train_new_rows_only: true
+  args:                        # passed to transformers.TrainingArguments
+    max_steps: 2000
+    per_device_train_batch_size: 8
+    gradient_accumulation_steps: 4
+    learning_rate: 1.0e-3
+    lr_scheduler_type: cosine
+    warmup_ratio: 0.02
+    weight_decay: 0.0
+    bf16: true
+    logging_steps: 10
+    eval_strategy: steps
+    eval_steps: 500
+    save_strategy: steps
+    save_steps: 1000
+    save_total_limit: 1
+    report_to: none
+
+stage2:                        # full model
+  dtype: float32
+  args:
+    num_train_epochs: 1
+    per_device_train_batch_size: 4
+    gradient_accumulation_steps: 8
+    learning_rate: 2.0e-5
+    lr_scheduler_type: cosine
+    warmup_ratio: 0.01
+    weight_decay: 0.1
+    bf16: true
+    gradient_checkpointing: true
+    logging_steps: 10
+    eval_strategy: steps
+    eval_steps: 1000
+    save_strategy: steps
+    save_steps: 2000
+    save_total_limit: 2
+    report_to: none
+
+eval:
+  max_length: 2048
+  sets:                        # compared in bits per byte, for the original and every stage
+    - name: tr_wiki
+      dataset: {path: wikimedia/wikipedia, name: 20231101.tr, split: train, streaming: true}
+      text_field: text
+      max_docs: 100            # same first documents as the held-out eval_docs above
+    - name: tr_web
+      dataset: {path: HuggingFaceFW/fineweb-2, name: tur_Latn, split: test, streaming: true}
+      text_field: text
+      max_docs: 100
+    - name: en
+      dataset: {path: HuggingFaceFW/fineweb-edu, name: sample-10BT, split: train, streaming: true}
+      text_field: text
+      max_docs: 100
