@@ -1,7 +1,7 @@
 import random
 
 import pytest
-from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
+from tokenizers import Tokenizer, decoders, models, normalizers, pre_tokenizers, trainers
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
 ENGLISH = [
@@ -33,11 +33,32 @@ def build_tokenizer(texts, vocab_size=400):
     return PreTrainedTokenizerFast(tokenizer_object=tok, bos_token="<|bos|>", eos_token="<|eos|>", pad_token="<|pad|>")
 
 
+def build_byte_fallback_tokenizer(texts, vocab_size=500):
+    """SentencePiece-style BPE (Llama 2, Mistral): "▁" for spaces, <0xXX> tokens for missing characters."""
+    tok = Tokenizer(models.BPE(byte_fallback=True, unk_token="<unk>", fuse_unk=True))
+    tok.normalizer = normalizers.Sequence([normalizers.Prepend("▁"), normalizers.Replace(" ", "▁")])
+    tok.decoder = decoders.Sequence(
+        [decoders.Replace("▁", " "), decoders.ByteFallback(), decoders.Fuse(), decoders.Strip(" ", 1, 0)]
+    )
+    byte_tokens = [f"<0x{i:02X}>" for i in range(256)]
+    trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=["<unk>", "<s>", "</s>", "<pad>"] + byte_tokens)
+    tok.train_from_iterator(texts, trainer)
+    return PreTrainedTokenizerFast(tokenizer_object=tok, bos_token="<s>", eos_token="</s>", unk_token="<unk>", pad_token="<pad>")
+
+
 @pytest.fixture
 def english_tokenizer(tmp_path):
     tok = build_tokenizer(ENGLISH * 20)
     tok.save_pretrained(tmp_path / "base_tokenizer")
     return tok
+
+
+@pytest.fixture(params=["byte_level", "byte_fallback"])
+def any_tokenizer(request):
+    """An English-only tokenizer of each supported kind: Korean is unknown to both."""
+    if request.param == "byte_level":
+        return build_tokenizer(ENGLISH * 20)
+    return build_byte_fallback_tokenizer(ENGLISH * 20)
 
 
 def build_model(tokenizer, tied, rows=None):

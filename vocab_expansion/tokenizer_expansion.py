@@ -9,6 +9,14 @@ target-language corpus, and are appended after the original merges. As a result:
 
 The last point holds because the original merges are exhausted on every word before a new merge
 can fire, and a new merge only creates a token that no original merge refers to.
+
+Two families of BPE are supported:
+
+* byte-level BPE (GPT-2, Llama 3, Qwen, ...): every character is already covered by byte tokens.
+* SentencePiece-style BPE with byte fallback (Llama 2, Mistral, ...): characters missing from the
+  vocab are encoded as <0xXX> byte tokens. Frequent missing characters are first added as tokens
+  of their own (their embedding is the mean of their byte tokens), and merges are then learned
+  over characters. Byte tokens are never merged: a merged "<0xEB><0x8B>" would not decode.
 """
 
 from __future__ import annotations
@@ -17,6 +25,7 @@ import heapq
 import json
 import logging
 import os
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Iterable
@@ -25,6 +34,40 @@ from tokenizers import Tokenizer
 
 logger = logging.getLogger(__name__)
 
+BYTE_TOKEN = re.compile(r"<0x[0-9A-Fa-f]{2}>")
+METASPACE = "▁"
+
+
+def _is_byte_token(token: str) -> bool:
+    return BYTE_TOKEN.fullmatch(token) is not None
+
+
+def _bytes_to_chars(pieces: list[str]) -> list[str]:
+    """Replace runs of byte-fallback tokens by the characters they encode."""
+    out, buffer = [], bytearray()
+    for piece in pieces:
+        if _is_byte_token(piece):
+            buffer.append(int(piece[3:5], 16))
+            continue
+        if buffer:
+            out.extend(buffer.decode("utf-8", errors="replace"))
+            buffer.clear()
+        out.append(piece)
+    if buffer:
+        out.extend(buffer.decode("utf-8", errors="replace"))
+    return out
+
+
+def _chars_to_bytes(pieces: list[str], vocab: dict) -> list[str]:
+    """Encode characters that are not in the vocab back to byte-fallback tokens."""
+    out = []
+    for piece in pieces:
+        if piece in vocab:
+            out.append(piece)
+        else:
+            out.extend(f"<0x{b:02X}>" for b in piece.encode("utf-8"))
+    return out
+
 
 @dataclass
 class ExpansionResult:
@@ -32,20 +75,24 @@ class ExpansionResult:
     new_tokens: list[str]  # in id order
     new_merges: list[tuple[str, str]]
     reused_tokens: list[str] = field(default_factory=list)  # merge results that were already in the vocab
+    new_chars: list[str] = field(default_factory=list)  # byte-fallback only: characters added as tokens
     segmentations: dict[str, list[str]] | None = None  # final segmentation of each training word
 
 
 def count_pretokens(backend: Tokenizer, texts: Iterable[str]) -> Counter:
-    """Count the pre-tokens ("words") of a corpus, as the tokenizer sees them before BPE."""
+    """Count the pre-tokens ("words") of a corpus, as the tokenizer sees them before BPE.
+
+    SentencePiece-style tokenizers often have no pre-tokenizer and mark spaces with "▁": their text
+    is also split before each "▁", so that words are counted, and no new token spans two words.
+    """
     normalizer, pre_tokenizer = backend.normalizer, backend.pre_tokenizer
     counts: Counter = Counter()
     for text in texts:
         if normalizer is not None:
             text = normalizer.normalize_str(text)
-        if pre_tokenizer is None:
-            counts[text] += 1
-        else:
-            counts.update(piece for piece, _ in pre_tokenizer.pre_tokenize_str(text))
+        pieces = [text] if pre_tokenizer is None else [p for p, _ in pre_tokenizer.pre_tokenize_str(text)]
+        for piece in pieces:
+            counts.update(w for w in re.split(f"(?={METASPACE})", piece) if w)
     return counts
 
 
@@ -124,10 +171,38 @@ def expand_bpe(
     special_contents = {t["content"] for t in added_tokens}
     next_id = max([*vocab.values(), *(t["id"] for t in added_tokens)]) + 1
 
+    byte_fallback = bool(model.get("byte_fallback"))
+
     # Segment every word with the original tokenizer: new merges are learned on top of it
-    words, freqs, keys = [], [], []
+    segmented = []
     for word, freq in pretoken_counts.items():
         pieces = [t.value for t in original.tokenize(word)]
+        segmented.append((word, freq, _bytes_to_chars(pieces) if byte_fallback else pieces))
+
+    new_tokens, new_merges, reused, banned = [], [], [], set()
+    new_chars = []
+    if byte_fallback:
+        # Frequent characters missing from the vocab become tokens; the others stay as byte tokens
+        char_counts: Counter = Counter()
+        for _, freq, pieces in segmented:
+            for piece in pieces:
+                if piece not in vocab:
+                    char_counts[piece] += freq
+        for char, count in char_counts.most_common():
+            if count < min_frequency or len(new_chars) == num_new_tokens:
+                break
+            if char in special_contents:
+                continue
+            vocab[char] = next_id
+            next_id += 1
+            new_chars.append(char)
+        new_tokens.extend(new_chars)
+        segmented = [(word, freq, _chars_to_bytes(pieces, vocab)) for word, freq, pieces in segmented]
+        logger.info("Added %d characters missing from the vocab (%d left as byte tokens)",
+                    len(new_chars), len(char_counts) - len(new_chars))
+
+    words, freqs, keys = [], [], []
+    for word, freq, pieces in segmented:
         if len(pieces) > 1 or return_segmentations:
             words.append(pieces)
             freqs.append(freq)
@@ -135,14 +210,17 @@ def expand_bpe(
     logger.info("Learning merges on %d unique words", len(words))
 
     learner = _MergeLearner(words, freqs)
-    new_tokens, new_merges, reused, banned = [], [], [], set()
     while len(new_tokens) < num_new_tokens:
         pair, count = learner.pop_best(banned)
         if pair is None or count < min_frequency:
             logger.warning("Stopped after %d new tokens: no pair occurs %d+ times", len(new_tokens), min_frequency)
             break
         merged = pair[0] + pair[1]
-        if merged in special_contents or (max_token_length and len(merged) > max_token_length):
+        if (
+            merged in special_contents
+            or (max_token_length and len(merged) > max_token_length)
+            or (byte_fallback and (_is_byte_token(pair[0]) or _is_byte_token(pair[1])))
+        ):
             banned.add(pair)
             continue
         learner.merge(pair)
@@ -164,6 +242,7 @@ def expand_bpe(
         new_tokens=new_tokens,
         new_merges=new_merges,
         reused_tokens=reused,
+        new_chars=new_chars,
         segmentations=dict(zip(keys, learner.words)) if return_segmentations else None,
     )
 
@@ -195,6 +274,7 @@ def expand_tokenizer(
                 "num_new_tokens": len(result.new_tokens),
                 "new_token_ids": [new_tokenizer.convert_tokens_to_ids(t) for t in result.new_tokens],
                 "num_reused_tokens": len(result.reused_tokens),
+                "num_new_chars": len(result.new_chars),
             },
             f,
         )

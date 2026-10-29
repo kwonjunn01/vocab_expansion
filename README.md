@@ -35,7 +35,7 @@ https://github.com/kwonjunn01/vocab_expansion 를 clone해서 README를 읽고 �
 - GPU: <예: H100 x 8>
 
 순서:
-1. 토크나이저가 byte-level BPE인지 먼저 확인
+1. 토크나이저가 BPE(byte-level 또는 byte-fallback)인지 먼저 확인
 2. configs/example.yaml을 복사해서 위 정보로 수정
 3. 아주 작은 설정으로 스모크 테스트를 끝까지 돌리고 결과(verification.json, logit 변화, eval/results.json)를 보고해줘
 4. 문제 없으면 실제 규모로 실행
@@ -71,7 +71,16 @@ python pipeline.py --config configs/example.yaml --from stage2    # 이 단계�
 - **토큰당 perplexity로 비교하면 안 됩니다.** 토크나이저가 바뀌어 토큰 수가 다르기 때문입니다. `evaluate`는 tokenizer와 무관한 bits per byte로 비교합니다.
 - **Stage 1에서는 원래 행이 변하지 않도록 보장합니다.** 원래 행의 gradient는 0으로 막고, weight decay는 강제로 0으로 둡니다(decay가 있으면 얼린 행도 줄어들기 때문). Stage 1은 학습하는 파라미터가 적으므로 DDP로 충분합니다. gradient hook은 FSDP의 flat parameter와 맞지 않습니다.
 - **Stage 2는 규모에 따라 FSDP나 DeepSpeed를 씁니다.** `accelerate config`로 설정하면 됩니다. 1–3B dense 모델이면 Megatron 없이 충분합니다.
-- **지원하는 토크나이저**: byte-level BPE(GPT-2, Llama 3, Qwen, LFM 계열). SentencePiece Unigram이나 `##` prefix를 쓰는 WordPiece/BPE는 지원하지 않습니다.
+- **지원하는 토크나이저**: `tokenizer.json`의 모델 타입이 `BPE`인 두 계열입니다.
+  - byte-level BPE (GPT-2, Llama 3, Qwen, LFM 계열)
+  - byte-fallback BPE (Llama 2, Mistral 등 SentencePiece 계열)
+
+  byte-fallback BPE에서는 vocab에 없는 글자를 `<0xXX>` 바이트 토큰으로 표현합니다. 그래서 대상 언어에서 자주 나오는 글자를 먼저 글자 토큰으로 추가하고(임베딩은 그 글자의 바이트 토큰 평균), 그다음 글자 위에서 merge를 학습합니다. 바이트 토큰끼리는 merge하지 않고(`<0xEB><0x8B>` 같은 토큰은 디코딩이 안 되기 때문), `▁`를 사이에 둔 두 단어를 하나로 합친 토큰도 만들지 않습니다. `min_frequency`보다 드물게 나오는 글자는 그대로 바이트 토큰으로 남습니다.
+
+  SentencePiece Unigram과 `##` prefix를 쓰는 WordPiece/BPE는 지원하지 않습니다. 확인 방법:
+  ```bash
+  python -c "from transformers import AutoTokenizer as T; import json; t=T.from_pretrained('<모델>'); m=json.loads(t.backend_tokenizer.to_str())['model']; print(m['type'], 'byte_fallback' if m.get('byte_fallback') else '')"
+  ```
 - **padding 행**: `pad_to_multiple_of`로 생긴, 어떤 토큰도 쓰지 않는 행은 기존 임베딩의 평균값으로 채웁니다.
 - **instruct 모델에서 시작했다면** CPT 이후 SFT 등으로 채팅 능력을 복구해야 합니다.
 
@@ -81,12 +90,13 @@ python pipeline.py --config configs/example.yaml --from stage2    # 이 단계�
 python -m pytest -q
 ```
 
-작은 byte-level BPE 토크나이저와 2-layer Llama로 CPU에서 확인하는 항목:
+작은 byte-level BPE와 byte-fallback BPE 토크나이저, 2-layer Llama로 CPU에서 확인하는 항목:
 
 - 기존 ID가 보존되고 새 ID는 끝에 붙는지
 - 학습 시 분절 결과가 저장된 토크나이저의 추론 결과와 일치하는지
 - 한국어 압축률이 2배 이상 좋아지고 영어 토큰화는 그대로인지
 - 새 행이 서브토큰 평균인지(tied, untied 모두)
+- byte-fallback에서 글자 토큰이 추가되고, 바이트 토큰은 merge되지 않는지
 - 원래 logits이 변하지 않는지
 - Stage 1은 새 행만, Stage 2는 본체까지 바꾸는지
 - 전체 파이프라인이 끝까지 돌고 재실행 시 건너뛰는지

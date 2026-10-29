@@ -7,17 +7,17 @@ from vocab_expansion.tokenizer_expansion import expand_tokenizer
 
 
 @pytest.mark.parametrize("tied", [True, False])
-def test_new_rows_are_mean_of_parts_and_original_logits_unchanged(english_tokenizer, tmp_path, tied):
+def test_new_rows_are_mean_of_parts_and_original_logits_unchanged(any_tokenizer, tmp_path, tied):
     torch.manual_seed(0)
-    new_tok, _ = expand_tokenizer(english_tokenizer, korean_texts(300), 40, str(tmp_path / "tok"))
-    model = build_model(english_tokenizer, tied)
+    new_tok, _ = expand_tokenizer(any_tokenizer, korean_texts(300), 40, str(tmp_path / "tok"))
+    model = build_model(any_tokenizer, tied)
     reference = model.get_input_embeddings().weight.detach().clone()
     reference_out = model.get_output_embeddings().weight.detach().clone()
 
-    probe = english_tokenizer("The quick brown fox", return_tensors="pt").input_ids
-    n_old = len(english_tokenizer)
+    probe = any_tokenizer("The quick brown fox", return_tensors="pt").input_ids
+    n_old = len(any_tokenizer)
     before = original_logits(model, probe, n_old)
-    meta = expand_embeddings(model, english_tokenizer, new_tok, pad_to_multiple_of=64)
+    meta = expand_embeddings(model, any_tokenizer, new_tok, pad_to_multiple_of=64)
     after = original_logits(model, probe, n_old)
 
     assert torch.allclose(before, after, atol=1e-5)
@@ -28,20 +28,20 @@ def test_new_rows_are_mean_of_parts_and_original_logits_unchanged(english_tokeni
     emb = model.get_input_embeddings().weight
     out = model.get_output_embeddings().weight
     assert torch.equal(emb[:n_old], reference[:n_old])
-    for idx, parts in new_token_decompositions(english_tokenizer, new_tok).items():
+    for idx, parts in new_token_decompositions(any_tokenizer, new_tok).items():
         assert len(parts) >= 2
         torch.testing.assert_close(emb[idx], reference[parts].mean(0))
         torch.testing.assert_close(out[idx], reference_out[parts].mean(0))
 
 
-def test_new_tokens_can_reuse_spare_rows(english_tokenizer, tmp_path):
+def test_new_tokens_can_reuse_spare_rows(any_tokenizer, tmp_path):
     """A model may have more embedding rows than tokens: new tokens then take over the spare rows."""
-    new_tok, _ = expand_tokenizer(english_tokenizer, korean_texts(300), 20, str(tmp_path / "tok"))
-    rows = len(english_tokenizer) + 100
-    model = build_model(english_tokenizer, tied=True, rows=rows)
-    meta = expand_embeddings(model, english_tokenizer, new_tok, pad_to_multiple_of=64)
+    new_tok, _ = expand_tokenizer(any_tokenizer, korean_texts(300), 20, str(tmp_path / "tok"))
+    rows = len(any_tokenizer) + 100
+    model = build_model(any_tokenizer, tied=True, rows=rows)
+    meta = expand_embeddings(model, any_tokenizer, new_tok, pad_to_multiple_of=64)
     assert meta["embedding_rows"] == rows  # no resize needed
     assert meta["padding_ids"] == []
     emb = model.get_input_embeddings().weight
-    for idx, parts in new_token_decompositions(english_tokenizer, new_tok).items():
+    for idx, parts in new_token_decompositions(any_tokenizer, new_tok).items():
         torch.testing.assert_close(emb[idx], emb[parts].mean(0))
