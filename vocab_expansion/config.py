@@ -14,6 +14,9 @@ Short form:
         subset: sample-10BT
     replay_ratio: 0.25
     train_tokens: 2_000_000_000
+    donor:                            # optional: restore the language's tokens from a larger vocabulary
+      tokenizer: google/gemma-4-...   # the vocabulary the model's was pruned from
+      model: google/gemma-4-...       # optional: copy the donor's embedding rows of restored tokens
 
 Any section of the full form (tokenizer, data, stage1, stage2, eval, ...) can still be given and
 overrides what is generated.
@@ -166,7 +169,7 @@ def resolve_config(raw: dict) -> dict:
     config = copy.deepcopy(DEFAULTS)
     if "languages" in raw:
         config = deep_merge(config, _from_short_form(raw))
-    size = {k: raw[k] for k in ("target_vocab_size", "num_new_tokens") if k in raw}
+    size = {k: raw[k] for k in ("target_vocab_size", "num_new_tokens", "donor", "learn_remaining") if k in raw}
     config = deep_merge(config, {"tokenizer": size})
     config = deep_merge(config, {k: v for k, v in raw.items() if k not in SHORT_FORM_KEYS})
     tokenizer = config["tokenizer"]
@@ -180,7 +183,7 @@ def resolve_config(raw: dict) -> dict:
 
 SHORT_FORM_KEYS = {
     "languages", "replay", "replay_ratio", "eval_docs", "tokenizer_docs_per_language",
-    "target_vocab_size", "num_new_tokens", "train_tokens",
+    "target_vocab_size", "num_new_tokens", "train_tokens", "donor", "learn_remaining",
 }
 
 

@@ -36,13 +36,17 @@ def build_tokenizer(texts, vocab_size=400):
 def build_byte_fallback_tokenizer(texts, vocab_size=500):
     """SentencePiece-style BPE (Llama 2, Mistral): "▁" for spaces, <0xXX> tokens for missing characters."""
     tok = Tokenizer(models.BPE(byte_fallback=True, unk_token="<unk>", fuse_unk=True))
-    tok.normalizer = normalizers.Sequence([normalizers.Prepend("▁"), normalizers.Replace(" ", "▁")])
+    # Like SentencePiece, train on words, so that no token spans two words...
+    tok.pre_tokenizer = pre_tokenizers.Metaspace(replacement="▁", prepend_scheme="first", split=True)
     tok.decoder = decoders.Sequence(
         [decoders.Replace("▁", " "), decoders.ByteFallback(), decoders.Fuse(), decoders.Strip(" ", 1, 0)]
     )
     byte_tokens = [f"<0x{i:02X}>" for i in range(256)]
     trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=["<unk>", "<s>", "</s>", "<pad>"] + byte_tokens)
     tok.train_from_iterator(texts, trainer)
+    # ...but tokenize like Llama 2: spaces become "▁" and there is no pre-tokenizer
+    tok.pre_tokenizer = None
+    tok.normalizer = normalizers.Sequence([normalizers.Prepend("▁"), normalizers.Replace(" ", "▁")])
     return PreTrainedTokenizerFast(tokenizer_object=tok, bos_token="<s>", eos_token="</s>", unk_token="<unk>", pad_token="<pad>")
 
 

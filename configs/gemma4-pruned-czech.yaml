@@ -1,0 +1,29 @@
+# A model whose vocabulary was pruned from Gemma 4's: add Czech back.
+# Czech tokens are restored from the original Gemma 4 vocabulary by content (never by Gemma 4 id),
+# with the trained Gemma 4 embedding rows; any budget left is filled with newly learned merges.
+
+base_model: /models/my-pruned-gemma4        # the pruned model and its tokenizer
+output_dir: runs/pruned-gemma4-cs
+launcher: accelerate launch
+
+target_vocab_size: 120000                    # final vocabulary size (or num_new_tokens: 20000)
+
+donor:
+  tokenizer: google/gemma-4-<size>           # the original, unpruned tokenizer (Hub name or local path)
+  model: google/gemma-4-<size>               # optional: only its embedding matrix is read
+  # max_tokens: 15000                        # cap on restored tokens; default: the whole budget
+  # embedding_key: model.language_model.embed_tokens.weight   # if it is not found automatically
+learn_remaining: true                        # learn new merges with what the donor leaves of the budget
+
+languages:
+  - name: cs
+    data: HuggingFaceFW/fineweb-2
+    subset: ces_Latn
+
+replay:
+  - name: en
+    data: HuggingFaceFW/fineweb-edu
+    subset: sample-10BT
+
+replay_ratio: 0.25
+train_tokens: 2_000_000_000

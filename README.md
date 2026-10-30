@@ -54,6 +54,30 @@ Liquid AI의 방식(블로그 "Tokenizer Expansion", 논문 *In-Place Tokenizer 
 - 정하기 어렵다면 크기를 2~3개로 바꿔 `--stages tokenizer`만 돌려 보고 `verification.json`의 압축률(`compression_gain`)을 비교하세요. 이 단계는 GPU가 필요 없습니다.
 - byte-fallback 토크나이저에서는 새로 추가되는 글자 토큰도 이 개수에 포함됩니다.
 
+### pruning한 vocab에 원래 토큰 되살리기 (예: Gemma 4)
+
+모델의 vocab이 더 큰 vocab(예: Gemma 4)에서 pruning한 것이라면, 새 merge를 처음부터 학습하는 대신 **원래 vocab에 있던 그 언어의 토큰을 되살릴 수 있습니다.** config에 `donor`를 추가하세요(`configs/gemma4-pruned-czech.yaml` 참고).
+
+```yaml
+donor:
+  tokenizer: google/gemma-4-<size>   # pruning하기 전 원래 토크나이저
+  model: google/gemma-4-<size>       # 선택: 되살린 토큰의 임베딩을 원래 가중치에서 복사
+learn_remaining: true                # 남는 자리는 새 merge 학습으로 채움
+```
+
+동작 방식:
+1. **어떤 토큰을 되살리는지:** 대상 언어(예: 체코어) 코퍼스를 원래 토크나이저로 토큰화한 뒤, 현재 vocab에 없는 토큰을 많이 나오는 순서대로 되살립니다. 그 토큰을 만드는 데 필요한 중간 토큰과 merge도 같이 가져옵니다.
+2. **ID 처리:** 원래 vocab의 ID는 쓰지 않습니다. 토큰 문자열(내용)로 맞추고, 현재 vocab 끝에 새 ID를 붙입니다. 기존 ID는 그대로입니다.
+3. **merge 순서:** pruning된 merge가 원래 merge의 순서를 그대로 유지하고 있으면(일반적인 pruning 결과), 되살린 merge를 원래 위치에 끼워 넣습니다. 그러면 되살린 언어가 원래 토크나이저와 똑같이 토큰화됩니다. 순서가 다르면 경고를 띄우고 맨 뒤에 붙입니다.
+4. **임베딩:** `donor.model`을 주면 되살린 토큰은 **원래 모델에서 학습된 임베딩 행을 그대로 복사**합니다. safetensors에서 임베딩 행렬만 읽습니다. 원래 vocab에 없는 토큰은 지금처럼 서브토큰 평균으로 초기화합니다.
+5. **남는 자리:** 목표 크기까지 자리가 남으면 `learn_remaining: true`일 때 그 위에서 BPE를 이어서 학습합니다.
+
+`tokenizer/verification.json`의 `donor_agreement`는 원래 토크나이저와 토큰 경계가 일치하는 비율입니다(1.0이면 완전히 같음). `expansion.json`에서는 되살린 수(`num_restored_from_donor`)와 새로 학습한 수(`num_learned`)를 볼 수 있습니다.
+
+주의할 점:
+- 두 토크나이저는 같은 계열이어야 합니다. 둘 다 BPE이고, `byte_fallback` 설정이 같아야 합니다. normalizer나 pre-tokenizer가 다르면 경고합니다.
+- 입력/출력 임베딩 말고도 토큰마다 행이 있는 파라미터(예: Gemma 3n의 per-layer embedding)가 있으면 지원하지 않으며, 바로 에러로 알려줍니다. Gemma 4 구조는 아직 확인하지 못했습니다.
+
 > 아직 실제 모델과 GPU로는 돌려보지 않았습니다(작은 모델로 CPU 테스트만 통과). 처음에는 반드시 작은 설정으로 스모크 테스트를 하세요.
 
 ### AI 에이전트에게 맡길 때

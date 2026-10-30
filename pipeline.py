@@ -24,6 +24,7 @@ import yaml
 
 from vocab_expansion.config import load_config, num_new_tokens
 from vocab_expansion.data import iter_texts, prepare_data
+from vocab_expansion.donor import donor_agreement, donor_rows, load_donor_embeddings
 from vocab_expansion.embedding_init import expand_embeddings, original_logits
 from vocab_expansion.evaluate import evaluate
 from vocab_expansion.tokenizer_expansion import expand_tokenizer, verify_expansion
@@ -66,15 +67,25 @@ def run_tokenizer(config, out_dir):
     old_size = max(old.get_vocab().values()) + 1
     n_new = num_new_tokens(cfg, old_size)
     logger.info("Vocabulary: %d -> %d tokens (%d new)", old_size, old_size + n_new, n_new)
+    donor_cfg = cfg.get("donor") or {}
+    donor = load_tokenizer(donor_cfg["tokenizer"], config) if donor_cfg.get("tokenizer") else None
     new, _ = expand_tokenizer(
         old,
-        corpus_texts(cfg["corpus"]),
+        lambda: corpus_texts(cfg["corpus"]),
         num_new_tokens=n_new,
         output_dir=out_dir,
         min_frequency=cfg.get("min_frequency", 2),
         max_token_length=cfg.get("max_token_length"),
+        donor=donor,
+        donor_max_tokens=donor_cfg.get("max_tokens"),
+        learn_remaining=cfg.get("learn_remaining", True),
     )
-    report = {name: verify_expansion(old, new, texts) for name, texts in eval_texts(config).items()}
+    report = {}
+    for name, texts in eval_texts(config).items():
+        report[name] = verify_expansion(old, new, texts)
+        if donor is not None:
+            # 1.0: the expanded tokenizer splits these texts exactly like the donor
+            report[name]["donor_agreement"] = donor_agreement(new, donor, texts)
     with open(os.path.join(out_dir, "verification.json"), "w") as f:
         json.dump(report, f, indent=2)
     for name, stats in report.items():
@@ -86,12 +97,17 @@ def run_init(config, out_dir):
     old_tok = load_tokenizer(config["base_model"], config)
     new_tok = load_tokenizer(os.path.join(config["output_dir"], "tokenizer"), config)
     model = load_model(config["base_model"], config, config.get("init", {}).get("dtype", "float32"))
+    donor_cfg = config["tokenizer"].get("donor") or {}
+    donor = None
+    if donor_cfg.get("model"):
+        embeddings = load_donor_embeddings(donor_cfg["model"], donor_cfg.get("embedding_key"), donor_cfg.get("output_key"))
+        donor = donor_rows(load_tokenizer(donor_cfg.get("tokenizer", donor_cfg["model"]), config), embeddings)
 
     # The original logits of text tokenized with the original tokenizer must not change
     probe = old_tok("Vocabulary expansion must not change what the model already knows.", return_tensors="pt").input_ids
     n_old = max(old_tok.get_vocab().values()) + 1
     before = original_logits(model, probe, n_old)
-    meta = expand_embeddings(model, old_tok, new_tok, config["tokenizer"].get("pad_to_multiple_of", 64))
+    meta = expand_embeddings(model, old_tok, new_tok, config["tokenizer"].get("pad_to_multiple_of", 64), donor)
     diff = (original_logits(model, probe, n_old) - before).abs().max().item()
     logger.info("Max change of original logits after expansion: %.2e", diff)
     if diff > config.get("init", {}).get("max_logit_change", 1e-2):

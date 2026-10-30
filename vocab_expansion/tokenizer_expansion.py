@@ -76,6 +76,7 @@ class ExpansionResult:
     new_merges: list[tuple[str, str]]
     reused_tokens: list[str] = field(default_factory=list)  # merge results that were already in the vocab
     new_chars: list[str] = field(default_factory=list)  # byte-fallback only: characters added as tokens
+    restored_tokens: list[str] = field(default_factory=list)  # taken from a donor vocabulary
     segmentations: dict[str, list[str]] | None = None  # final segmentation of each training word
 
 
@@ -249,20 +250,49 @@ def expand_bpe(
 
 def expand_tokenizer(
     tokenizer,
-    texts: Iterable[str],
+    texts,
     num_new_tokens: int,
     output_dir: str,
     min_frequency: int = 2,
     max_token_length: int | None = None,
+    donor=None,
+    donor_max_tokens: int | None = None,
+    learn_remaining: bool = True,
 ):
-    """Expand a Hugging Face fast tokenizer and save it, with its config and chat template, to `output_dir`."""
+    """Expand a Hugging Face fast tokenizer and save it, with its config and chat template, to `output_dir`.
+
+    `texts` is an iterable of strings, or a function returning one (needed to read the corpus twice).
+    With a `donor` tokenizer, its tokens for the corpus are restored first (see `vocab_expansion.donor`),
+    then, if `learn_remaining`, new merges fill the rest of the `num_new_tokens` budget.
+    """
     from transformers import AutoTokenizer
 
-    backend = tokenizer.backend_tokenizer
-    counts = count_pretokens(backend, texts)
-    logger.info("Counted %d unique pre-tokens", len(counts))
-    result = expand_bpe(json.loads(backend.to_str()), counts, num_new_tokens, min_frequency, max_token_length)
-    logger.info("Added %d new tokens (%d merges reuse existing tokens)", len(result.new_tokens), len(result.reused_tokens))
+    if not callable(texts):
+        corpus = list(texts) if donor is not None else texts  # a donor reads the corpus twice
+        texts = lambda: corpus  # noqa: E731
+    tokenizer_json = json.loads(tokenizer.backend_tokenizer.to_str())
+
+    restored: list[str] = []
+    if donor is not None:
+        from vocab_expansion.donor import count_donor_tokens, restore_donor_tokens
+
+        budget = num_new_tokens if donor_max_tokens is None else min(num_new_tokens, donor_max_tokens)
+        donor_counts = count_donor_tokens(donor, texts())
+        restore = restore_donor_tokens(
+            tokenizer_json, json.loads(donor.backend_tokenizer.to_str()), donor_counts, budget, min_frequency
+        )
+        tokenizer_json, restored = restore.tokenizer_json, restore.restored_tokens
+
+    remaining = num_new_tokens - len(restored)
+    if remaining > 0 and (donor is None or learn_remaining):
+        counts = count_pretokens(Tokenizer.from_str(json.dumps(tokenizer_json)), texts())
+        logger.info("Counted %d unique pre-tokens", len(counts))
+        result = expand_bpe(tokenizer_json, counts, remaining, min_frequency, max_token_length)
+        logger.info("Learned %d new tokens (%d merges reuse existing tokens)", len(result.new_tokens), len(result.reused_tokens))
+    else:
+        result = ExpansionResult(tokenizer_json=tokenizer_json, new_tokens=[], new_merges=[])
+    result.restored_tokens = restored
+    result.new_tokens = restored + result.new_tokens
 
     tokenizer.save_pretrained(output_dir)
     with open(os.path.join(output_dir, "tokenizer.json"), "w", encoding="utf-8") as f:
@@ -272,6 +302,8 @@ def expand_tokenizer(
         json.dump(
             {
                 "num_new_tokens": len(result.new_tokens),
+                "num_restored_from_donor": len(restored),
+                "num_learned": len(result.new_tokens) - len(restored),
                 "new_token_ids": [new_tokenizer.convert_tokens_to_ids(t) for t in result.new_tokens],
                 "num_reused_tokens": len(result.reused_tokens),
                 "num_new_chars": len(result.new_chars),
